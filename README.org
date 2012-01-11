@@ -30,10 +30,10 @@ development), you first need to get rilproxy to expose it as such,
 rather than exposing it to Gecko:
 
   adb shell
-  # touch /data/local/rilproxyd
-  # ps
+  $ touch /data/local/rilproxyd
+  $ ps
   <look for rilproxyd_pid>
-  # kill <rilproxyd_pid>
+  $ kill <rilproxyd_pid>
 
 Now on the desktop, run the following command:
 
