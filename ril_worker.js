@@ -116,6 +116,9 @@ let Buf = {
     // Maps tokens we send out with requests to the request type, so that
     // when we get a response parcel back, we know what request it was for.
     this.tokenRequestMap = {};
+
+    // This is the token of last solicited response.
+    this.lastSolicitedToken = 0;
   },
 
   /**
@@ -429,7 +432,6 @@ let Buf = {
   /**
    * Process one parcel.
    */
-
   processParcel: function processParcel() {
     let response_type = this.readUint32();
     let length = this.readIncoming - UINT32_SIZE;
@@ -442,19 +444,24 @@ let Buf = {
       request_type = this.tokenRequestMap[token];
       if (error) {
         //TODO
-        debug("Received error " + error + " for solicited parcel type " +
-              request_type);
+        if (DEBUG) {
+          debug("Received error " + error + " for solicited parcel type " +
+                request_type);
+        }
         return;
       }
-      debug("Solicited response for request type " + request_type +
-            ", token " + token);
+      if (DEBUG) {
+        debug("Solicited response for request type " + request_type +
+              ", token " + token);
+      }
       delete this.tokenRequestMap[token];
+      this.lastSolicitedToken = token;
     } else if (response_type == RESPONSE_TYPE_UNSOLICITED) {
       request_type = this.readUint32();
       length -= UINT32_SIZE;
-      debug("Unsolicited response for request type " + request_type);
+      if (DEBUG) debug("Unsolicited response for request type " + request_type);
     } else {
-      debug("Unknown response type: " + response_type);
+      if (DEBUG) debug("Unknown response type: " + response_type);
       return;
     }
 
@@ -479,9 +486,8 @@ let Buf = {
   },
 
   /**
-   * Communication with the RIL IPC thread.
+   * Communicate with the RIL IPC thread.
    */
-
   sendParcel: function sendParcel() {
     // Compute the size of the parcel and write it to the front of the parcel
     // where we left room for it. Note that he parcel size does not include
@@ -492,7 +498,7 @@ let Buf = {
     // This assumes that postRILMessage will make a copy of the ArrayBufferView
     // right away!
     let parcel = this.outgoingBytes.subarray(0, this.outgoingIndex);
-    debug("Outgoing parcel: " + Array.slice(parcel));
+    if (DEBUG) debug("Outgoing parcel: " + Array.slice(parcel));
     postRILMessage(parcel);
     this.outgoingIndex = PARCEL_SIZE_SIZE;
   },
@@ -513,7 +519,7 @@ let Buf = {
 let RIL = {
 
   /**
-   * Retrieve the ICC card's status.
+   * Retrieve the ICC's status.
    *
    * Response will call Phone.onICCStatus().
    */
@@ -527,7 +533,7 @@ let RIL = {
    * @param pin
    *        String containing the PIN.
    *
-   * Response will call Phone.onEnterSIMPIN().
+   * Response will call Phone.onEnterICCPIN().
    */
   enterICCPIN: function enterICCPIN(pin) {
     Buf.newParcel(REQUEST_ENTER_SIM_PIN);
@@ -535,6 +541,42 @@ let RIL = {
     Buf.writeString(pin);
     Buf.sendParcel();
   },
+
+  /**
+   * Change the current ICC PIN number
+   *
+   * @param oldPin
+   *        String containing the old PIN value
+   * @param newPin
+   *        String containing the new PIN value
+   *
+   * Response will call Phone.onChangeICCPIN().
+   */
+  changeICCPIN: function changeICCPIN(oldPin, newPin) {
+    Buf.newParcel(REQUEST_CHANGE_SIM_PIN);
+    Buf.writeUint32(2);
+    Buf.writeString(oldPin);
+    Buf.writeString(newPin);
+    Buf.sendParcel();
+  },
+
+  /**
+   * Supplies SIM PUK and a new PIN to unlock the ICC
+   *
+   * @param puk
+   *        String containing the PUK value.
+   * @param newPin
+   *        String containing the new PIN value.
+   *
+   * Response will call Phone.onEnterICCPUK().
+   */
+   enterICCPUK: function enterICCPUK(puk, newPin) {
+     Buf.newParcel(REQUEST_ENTER_SIM_PUK);
+     Buf.writeUint32(2);
+     Buf.writeString(puk);
+     Buf.writeString(newPin);
+     Buf.sendParcel();
+   },
 
   /**
    * Request the phone's radio power to be switched on or off.
@@ -714,7 +756,6 @@ let RIL = {
    * @param dtmfChar
    *        DTMF signal to send, 0-9, *, +
    */
-
   startTone: function startTone(dtmfChar) {
     Buf.newParcel(REQUEST_DTMF_START);
     Buf.writeString(dtmfChar);
@@ -744,11 +785,78 @@ let RIL = {
    * @param smsc
    *        Short Message Service Center address in PDU format.
    */
-   setSMSCAddress: function setSMSCAddress(smsc) {
-     Buf.newParcel(REQUEST_SET_SMSC_ADDRESS);
-     Buf.writeString(smsc);
-     Buf.sendParcel();
-   },
+  setSMSCAddress: function setSMSCAddress(smsc) {
+    Buf.newParcel(REQUEST_SET_SMSC_ADDRESS);
+    Buf.writeString(smsc);
+    Buf.sendParcel();
+  },
+
+  /**
+   * Setup a data call.
+   *
+   * @param radioTech
+   *        Integer to indicate radio technology.
+   *        DATACALL_RADIOTECHNOLOGY_CDMA => CDMA.
+   *        DATACALL_RADIOTECHNOLOGY_GSM  => GSM.
+   * @param apn
+   *        String containing the name of the APN to connect to.
+   * @param user
+   *        String containing the username for the APN.
+   * @param passwd
+   *        String containing the password for the APN.
+   * @param chappap
+   *        Integer containing CHAP/PAP auth type.
+   *        DATACALL_AUTH_NONE        => PAP and CHAP is never performed.
+   *        DATACALL_AUTH_PAP         => PAP may be performed.
+   *        DATACALL_AUTH_CHAP        => CHAP may be performed.
+   *        DATACALL_AUTH_PAP_OR_CHAP => PAP / CHAP may be performed.
+   * @param pdptype
+   *        String containing PDP type to request. ("IP", "IPV6", ...)
+   */
+  setupDataCall: function (radioTech, apn, user, passwd, chappap, pdptype) {
+    let token = Buf.newParcel(REQUEST_SETUP_DATA_CALL);
+    Buf.writeUint32(7);
+    Buf.writeString(radioTech.toString());
+    Buf.writeString(DATACALL_PROFILE_DEFAULT.toString());
+    Buf.writeString(apn);
+    Buf.writeString(user);
+    Buf.writeString(passwd);
+    Buf.writeString(chappap.toString());
+    Buf.writeString(pdptype);
+    Buf.sendParcel();
+    return token;
+  },
+
+  /**
+   * Deactivate a data call.
+   *
+   * @param cid
+   *        String containing CID.
+   * @param reason
+   *        One of DATACALL_DEACTIVATE_* constants.
+   */
+  deactivateDataCall: function (cid, reason) {
+    let token = Buf.newParcel(REQUEST_DEACTIVATE_DATA_CALL);
+    Buf.writeUint32(2);
+    Buf.writeString(cid);
+    Buf.writeString(reason);
+    Buf.sendParcel();
+    return token;
+  },
+
+  /**
+   * Get a list of data calls.
+   */
+  getDataCallList: function getDataCallList() {
+    Buf.simpleRequest(REQUEST_DATA_CALL_LIST);
+  },
+
+  /**
+   * Get failure casue code for the most recently failed PDP context.
+   */
+  getFailCauseCode: function getFailCauseCode() {
+    Buf.simpleRequest(REQUEST_LAST_CALL_FAIL_CAUSE);
+  },
 
   /**
    * Handle incoming requests from the RIL. We find the method that
@@ -759,7 +867,7 @@ let RIL = {
   handleParcel: function handleParcel(request_type, length) {
     let method = this[request_type];
     if (typeof method == "function") {
-      debug("Handling parcel as " + method.name);
+      if (DEBUG) debug("Handling parcel as " + method.name);
       method.call(this, length);
     }
   }
@@ -767,7 +875,7 @@ let RIL = {
 
 RIL[REQUEST_GET_SIM_STATUS] = function REQUEST_GET_SIM_STATUS() {
   let iccStatus = {
-    cardState:                   Buf.readUint32(), // CARDSTATE_*
+    cardState:                   Buf.readUint32(), // CARD_STATE_*
     universalPINState:           Buf.readUint32(), // PINSTATE_*
     gsmUmtsSubscriptionAppIndex: Buf.readUint32(),
     setCdmaSubscriptionAppIndex: Buf.readUint32(),
@@ -782,7 +890,7 @@ RIL[REQUEST_GET_SIM_STATUS] = function REQUEST_GET_SIM_STATUS() {
   for (let i = 0 ; i < apps_length ; i++) {
     iccStatus.apps.push({
       app_type:       Buf.readUint32(), // APPTYPE_*
-      app_state:      Buf.readUint32(), // APPSTATE_*
+      app_state:      Buf.readUint32(), // CARD_APP_STATE_*
       perso_substate: Buf.readUint32(), // PERSOSUBSTATE_*
       aid:            Buf.readString(),
       app_label:      Buf.readString(),
@@ -797,10 +905,15 @@ RIL[REQUEST_ENTER_SIM_PIN] = function REQUEST_ENTER_SIM_PIN() {
   let response = Buf.readUint32List();
   Phone.onEnterICCPIN(response);
 };
-RIL[REQUEST_ENTER_SIM_PUK] = null;
+RIL[REQUEST_ENTER_SIM_PUK] = function REQUEST_ENTER_SIM_PUK() {
+  let response = Buf.readUint32List();
+  Phone.onEnterICCPUK(response);
+};
 RIL[REQUEST_ENTER_SIM_PIN2] = null;
 RIL[REQUEST_ENTER_SIM_PUK2] = null;
-RIL[REQUEST_CHANGE_SIM_PIN] = null;
+RIL[REQUEST_CHANGE_SIM_PIN] = function REQUEST_CHANGE_SIM_PIN() {
+  Phone.onChangeICCPIN();
+};
 RIL[REQUEST_CHANGE_SIM_PIN2] = null;
 RIL[REQUEST_ENTER_NETWORK_DEPERSONALIZATION] = null;
 RIL[REQUEST_GET_CURRENT_CALLS] = function REQUEST_GET_CURRENT_CALLS(length) {
@@ -908,7 +1021,10 @@ RIL[REQUEST_SEND_SMS] = function REQUEST_SEND_SMS() {
   Phone.onSendSMS(messageRef, ackPDU, errorCode);
 };
 RIL[REQUEST_SEND_SMS_EXPECT_MORE] = null;
-RIL[REQUEST_SETUP_DATA_CALL] = null;
+RIL[REQUEST_SETUP_DATA_CALL] = function REQUEST_SETUP_DATA_CALL() {
+  let [cid, ifname, ipaddr, dns, gw] = Buf.readStringList();
+  Phone.onSetupDataCall(Buf.lastSolicitedToken, cid, ifname, ipaddr, dns, gw);
+};
 RIL[REQUEST_SIM_IO] = null;
 RIL[REQUEST_SEND_USSD] = null;
 RIL[REQUEST_CANCEL_USSD] = null;
@@ -932,7 +1048,9 @@ RIL[REQUEST_GET_IMEISV] = function REQUEST_GET_IMEISV() {
 RIL[REQUEST_ANSWER] = function REQUEST_ANSWER(length) {
   Phone.onAnswerCall();
 };
-RIL[REQUEST_DEACTIVATE_DATA_CALL] = null;
+RIL[REQUEST_DEACTIVATE_DATA_CALL] = function REQUEST_DEACTIVATE_DATA_CALL() {
+  Phone.onDeactivateDataCall(Buf.lastSolicitedToken);
+};
 RIL[REQUEST_QUERY_FACILITY_LOCK] = null;
 RIL[REQUEST_SET_FACILITY_LOCK] = null;
 RIL[REQUEST_CHANGE_BARRING_PASSWORD] = null;
@@ -952,7 +1070,7 @@ RIL[REQUEST_DTMF_STOP] = function REQUEST_DTMF_STOP() {
 RIL[REQUEST_BASEBAND_VERSION] = function REQUEST_BASEBAND_VERSION() {
   let version = Buf.readString();
   Phone.onBasebandVersion(version);
-},
+};
 RIL[REQUEST_SEPARATE_CONNECTION] = null;
 RIL[REQUEST_SET_MUTE] = function REQUEST_SET_MUTE(length) {
   Phone.onSetMute();
@@ -960,7 +1078,30 @@ RIL[REQUEST_SET_MUTE] = function REQUEST_SET_MUTE(length) {
 RIL[REQUEST_GET_MUTE] = null;
 RIL[REQUEST_QUERY_CLIP] = null;
 RIL[REQUEST_LAST_DATA_CALL_FAIL_CAUSE] = null;
-RIL[REQUEST_DATA_CALL_LIST] = null;
+RIL[REQUEST_DATA_CALL_LIST] = function REQUEST_DATA_CALL_LIST(length) {
+  let num = 0;
+  if (length) {
+    num = Buf.readUint32();
+  }
+  if (!num) {
+    Phone.onDataCallList(null);
+    return;
+  }
+
+  let datacalls = {};
+  for (let i = 0; i < num; i++) {
+    let datacall = {
+      cid: Buf.readUint32().toString(),
+      active: Buf.readUint32(),
+      type: Buf.readString(),
+      apn: Buf.readString(),
+      address: Buf.readString()
+    };
+    datacalls[datacall.cid] = datacall;
+  }
+
+  Phone.onDataCallList(datacalls);
+};
 RIL[REQUEST_RESET_RADIO] = null;
 RIL[REQUEST_OEM_HOOK_RAW] = null;
 RIL[REQUEST_OEM_HOOK_STRINGS] = null;
@@ -1039,7 +1180,9 @@ RIL[UNSOLICITED_NITZ_TIME_RECEIVED] = null;
 RIL[UNSOLICITED_SIGNAL_STRENGTH] = function UNSOLICITED_SIGNAL_STRENGTH() {
   this[REQUEST_SIGNAL_STRENGTH]();
 };
-RIL[UNSOLICITED_DATA_CALL_LIST_CHANGED] = null;
+RIL[UNSOLICITED_DATA_CALL_LIST_CHANGED] = function UNSOLICITED_DATA_CALL_LIST_CHANGED(length) {
+  Phone.onDataCallListChanged();
+};
 RIL[UNSOLICITED_SUPP_SVC_NOTIFICATION] = null;
 RIL[UNSOLICITED_STK_SESSION_END] = null;
 RIL[UNSOLICITED_STK_PROACTIVE_COMMAND] = null;
@@ -1060,7 +1203,9 @@ RIL[UNSOLICITED_CALL_RING] = function UNSOLICITED_CALL_RING() {
   }
   Phone.onCallRing(info);
 };
-RIL[UNSOLICITED_RESPONSE_SIM_STATUS_CHANGED] = null;
+RIL[UNSOLICITED_RESPONSE_SIM_STATUS_CHANGED] = function UNSOLICITED_RESPONSE_SIM_STATUS_CHANGED() {
+  Phone.onICCStatusChanged();
+};
 RIL[UNSOLICITED_RESPONSE_CDMA_NEW_SMS] = null;
 RIL[UNSOLICITED_RESPONSE_NEW_BROADCAST_SMS] = null;
 RIL[UNSOLICITED_CDMA_RUIM_SMS_STORAGE_FULL] = null;
@@ -1080,9 +1225,6 @@ RIL[UNSOLICITED_RESEND_INCALL_MUTE] = null;
  * mainthread via postMessage communication.
  */
 let Phone = {
-
-  //XXX TODO beware, this is just demo code. It's still missing
-  // communication with the UI thread.
 
   /**
    * One of the RADIO_STATE_* constants.
@@ -1113,9 +1255,15 @@ let Phone = {
   networkSelectionMode: null,
 
   /**
-   * ICC card status
+   * ICC status. Keeps a reference of the data response to the
+   * getICCStatus request.
    */
   iccStatus: null,
+
+  /**
+   * Card state
+   */
+  cardState: null,
 
   /**
    * Active calls
@@ -1126,6 +1274,16 @@ let Phone = {
    * Mute or unmute the radio.
    */
   _muted: true,
+
+  /**
+   * Existing data calls.
+   */
+  currentDataCalls: {},
+
+  /**
+   * Tracks active requests to the RIL concerning 3G data calls.
+   */
+  activeDataRequests: {},
 
   get muted() {
     return this._muted;
@@ -1160,7 +1318,9 @@ let Phone = {
    */
 
   onRadioStateChanged: function onRadioStateChanged(newState) {
-    debug("Radio state changed from " + this.radioState + " to " + newState);
+    if (DEBUG) {
+      debug("Radio state changed from " + this.radioState + " to " + newState);
+    }
     if (this.radioState == newState) {
       // No change in state, return.
       return;
@@ -1216,7 +1376,7 @@ let Phone = {
     if (newState == RADIO_STATE_SIM_READY  ||
         newState == RADIO_STATE_RUIM_READY ||
         newState == RADIO_STATE_NV_READY) {
-      // The ICC card has become available. Get all the things.
+      // The ICC has become available. Get all the things.
       RIL.getICCStatus();
       this.requestNetworkInfo();
       RIL.getSignalStrength();
@@ -1263,8 +1423,7 @@ let Phone = {
           currentCall.state = newCall.state;
           this._handleChangedCallState(currentCall);
         }
-      }
-      else {
+      } else {
         // Call is no longer reported by the radio. Remove from our map and
         // send disconnected state change.
         delete this.currentCalls[currentCall.callIndex];
@@ -1302,20 +1461,106 @@ let Phone = {
   },
 
   onNetworkStateChanged: function onNetworkStateChanged() {
-    debug("Network state changed, re-requesting phone state.");
+    if (DEBUG) debug("Network state changed, re-requesting phone state.");
     this.requestNetworkInfo();
   },
 
   onICCStatus: function onICCStatus(iccStatus) {
-    debug("SIM card state is " + iccStatus.cardState);
-    debug("Universal PIN state is " + iccStatus.universalPINState);
-    debug(iccStatus);
-    //TODO set to simStatus and figure out state transitions.
-    this.iccStatus = iccStatus; //XXX TODO
+    if (DEBUG) {
+      debug("iccStatus: " + JSON.stringify(iccStatus));
+    }
+    this.iccStatus = iccStatus;
+
+    if ((!iccStatus) || (iccStatus.cardState == CARD_STATE_ABSENT)) {
+      if (DEBUG) debug("ICC absent");
+      if (this.cardState == DOM_CARDSTATE_ABSENT) {
+        return;
+      }
+      this.cardState = DOM_CARDSTATE_ABSENT;
+      this.sendDOMMessage({type: "cardstatechange",
+                           cardState: this.cardState});
+      return;
+    }
+
+    if ((this.radioState == RADIO_STATE_OFF) ||
+        (this.radioState == RADIO_STATE_UNAVAILABLE) ||
+        (this.radioState == RADIO_STATE_SIM_NOT_READY) ||
+        (this.radioState == RADIO_STATE_RUIM_NOT_READY) ||
+        (this.radioState == RADIO_STATE_NV_NOT_READY) ||
+        (this.radioState == RADIO_STATE_NV_READY)) {
+      if (DEBUG) debug("ICC not ready");
+      if (this.cardState == DOM_CARDSTATE_NOT_READY) {
+        return;
+      }
+      this.cardState = DOM_CARDSTATE_NOT_READY;
+      this.sendDOMMessage({type: "cardstatechange",
+                           cardState: this.cardState});
+      return;
+    }
+
+    if ((this.radioState == RADIO_STATE_SIM_LOCKED_OR_ABSENT) ||
+        (this.radioState == RADIO_STATE_SIM_READY) ||
+        (this.radioState == RADIO_STATE_RUIM_LOCKED_OR_ABSENT) ||
+        (this.radioState == RADIO_STATE_RUIM_READY)) {
+      let app = iccStatus.apps[iccStatus.gsmUmtsSubscriptionAppIndex];
+      if (!app) {
+        if (DEBUG) {
+          debug("Subscription application is not present in iccStatus.");
+        }
+        if (this.cardState == DOM_CARDSTATE_ABSENT) {
+          return;
+        }
+        this.cardState = DOM_CARDSTATE_ABSENT;
+        this.sendDOMMessage({type: "cardstatechange",
+                             cardState: this.cardState});
+        return;
+      }
+
+      let newCardState;
+      switch (app.app_state) {
+        case CARD_APP_STATE_PIN:
+          newCardState = DOM_CARDSTATE_PIN_REQUIRED;
+          break;
+        case CARD_APP_STATE_PUK:
+          newCardState = DOM_CARDSTATE_PUK_REQUIRED;
+          break;
+        case CARD_APP_STATE_SUBSCRIPTION_PERSO:
+          newCardState = DOM_CARDSTATE_NETWORK_LOCKED;
+          break;
+        case CARD_APP_STATE_READY:
+          newCardState = DOM_CARDSTATE_READY;
+          break;
+        case CARD_APP_STATE_UNKNOWN:
+        case CARD_APP_STATE_DETECTED:
+        default:
+          newCardState = DOM_CARDSTATE_NOT_READY;
+      }
+
+      if (this.cardState == newCardState) {
+        return;
+      }
+      this.cardState = newCardState;
+      this.sendDOMMessage({type: "cardstatechange",
+                           cardState: this.cardState});
+    }
+  },
+
+  onICCStatusChanged: function onICCStatusChanged() {
+    RIL.getICCStatus();
   },
 
   onEnterICCPIN: function onEnterICCPIN(response) {
-    debug("REQUEST_ENTER_SIM_PIN returned " + response);
+    if (DEBUG) debug("REQUEST_ENTER_SIM_PIN returned " + response);
+    //TODO
+  },
+
+  onChangeICCPIN: function onChangeICCPIN() {
+    if (DEBUG) debug("REQUEST_CHANGE_SIM_PIN");
+    //TODO
+  },
+
+  onEnterICCPUK: function onEnterICCPUK(response) {
+    if (DEBUG) debug("REQUEST_ENTER_SIM_PUK returned " + response);
     //TODO
   },
 
@@ -1349,7 +1594,7 @@ let Phone = {
 
   onOperator: function onOperator(operator) {
     if (operator.length < 3) {
-      debug("Expected at least 3 strings for operator.");
+      if (DEBUG) debug("Expected at least 3 strings for operator.");
     }
     if (!this.operator ||
         this.operator.alphaLong  != operator[0] ||
@@ -1414,9 +1659,9 @@ let Phone = {
     // An SMS is a string, but we won't read it as such, so let's read the
     // string length and then defer to PDU parsing helper.
     let messageStringLength = Buf.readUint32();
-    debug("Got new SMS, length " + messageStringLength);
+    if (DEBUG) debug("Got new SMS, length " + messageStringLength);
     let message = GsmPDUHelper.readMessage();
-    debug(message);
+    if (DEBUG) debug(message);
 
     // Read string delimiters. See Buf.readString().
     let delimiter = Buf.readUint16();
@@ -1446,6 +1691,72 @@ let Phone = {
   },
 
   onAcknowledgeSMS: function onAcknowledgeSMS() {
+  },
+
+  onSetupDataCall: function onSetupDataCall(token, cid, ifname, ipaddr,
+                                            dns, gw) {
+    let options = this.activeDataRequests[token];
+    delete this.activeDataRequests[token];
+
+    let datacall = this.currentDataCalls[cid] = {
+      active: -1,
+      state: GECKO_NETWORK_STATE_CONNECTING,
+      cid: cid,
+      apn: options.apn,
+      ifname: ifname,
+      ipaddr: ipaddr,
+      dns: dns,
+      gw: gw,
+    };
+    this.sendDOMMessage({type: "datacallstatechange",
+                         datacall: datacall});
+  },
+
+  onDeactivateDataCall: function onDeactivateDataCall(token) {
+    let options = this.activeDataRequests[token];
+    delete this.activeDataRequests[token];
+  },
+
+  onDataCallList: function onDataCallList(datacalls) {
+    for each (let currentDataCall in this.currentDataCalls) {
+      let newDataCall;
+      if (datacalls) {
+        newDataCall = datacalls[currentDataCall.cid];
+        delete datacalls[currentDataCall.cid];
+      }
+
+      if (newDataCall) {
+        switch (newDataCall.active) {
+          case DATACALL_INACTIVE:
+            newDataCall.state = GECKO_NETWORK_STATE_DISCONNECTED;
+            break;
+          case DATACALL_ACTIVE_DOWN:
+            newDataCall.state = GECKO_NETWORK_STATE_SUSPENDED;
+            break;
+          case DATACALL_ACTIVE_UP:
+            newDataCall.state = GECKO_NETWORK_STATE_CONNECTED;
+            break;
+        }
+        if (newDataCall.state != currentDataCall.state) {
+          currentDataCall.state = newDataCall.state;
+          this.sendDOMMessage({type: "datacallstatechange",
+                               datacall: currentDataCall});
+        }
+      } else {
+        delete this.currentCalls[currentDataCall.callIndex];
+        currentDataCall.state = GECKO_NETWORK_STATE_DISCONNECTED;
+        this.sendDOMMessage({type: "datacallstatechange",
+                             datacall: currentDataCall});
+      }
+    }
+
+    for each (let datacall in datacalls) {
+      if (DEBUG) debug("Unexpected data call: " + JSON.strngify(datacall));
+    }
+  },
+
+  onDataCallListChanged: function onDataCallListChanged() {
+    RIL.getDataCallList();
   },
 
   /**
@@ -1482,6 +1793,15 @@ let Phone = {
       calls.push(call);
     }
     this.sendDOMMessage({type: "enumerateCalls", calls: calls});
+  },
+
+  enumerateDataCalls: function enumerateDataCalls() {
+    let datacall_list = [];
+    for each (let datacall in this.currentDataCalls) {
+      datacall_list.push(datacall);
+    }
+    this.sendDOMMessage({type: "datacalllist",
+                         datacalls: datacall_list});
   },
 
   /**
@@ -1581,7 +1901,9 @@ let Phone = {
       //TODO: we shouldn't get here, but if we do, we might want to hold on
       // to the message and retry once we know the SMSC... or just notify an
       // error to the mainthread and let them deal with retrying?
-      debug("Cannot send the SMS. Need to get the SMSC address first.");
+      if (DEBUG) {
+        debug("Cannot send the SMS. Need to get the SMSC address first.");
+      }
       return;
     }
     //TODO: verify values on 'options'
@@ -1590,6 +1912,53 @@ let Phone = {
     RIL.sendSMS(this.SMSC, options.number, options.body,
                 PDU_DCS_MSG_CODING_7BITS_ALPHABET, //TODO: hard-coded for now,
                 Math.ceil(options.body.length * 7 / 8)); //TODO: ditto
+  },
+
+  /**
+   * Setup a data call (PDP).
+   */
+  setupDataCall: function setupDataCall(options) {
+    if (DEBUG) debug("setupDataCall: " + JSON.stringify(options));
+
+    let token = RIL.setupDataCall(options.radioTech, options.apn,
+                                  options.user, options.passwd,
+                                  options.chappap, options.reason);
+    this.activeDataRequests[token] = options;
+    this.sendDOMMessage({type: "datacallstatechange",
+                         active: -1,
+                         state: GECKO_NETWORK_STATE_CONNECTING,
+                         apn: options.apn});
+  },
+
+  /**
+   * Deactivate a data call (PDP).
+   */
+  deactivateDataCall: function deactivateDataCall(options) {
+    if (!(options.cid in this.currentDataCalls)) {
+      return;
+    }
+
+    let token = RIL.deactivateDataCall(options.cid, options.reason);
+    this.activeDataRequests[token] = options;
+
+    let datacall = this.currentDataCalls[options.cid];
+    datacall.state = GECKO_NETWORK_STATE_DISCONNECTING;
+    this.sendDOMMessage({type: "datacallstatechange",
+                         datacall: datacall});
+  },
+
+  /**
+   * Get the list of data calls.
+   */
+  getDataCallList: function getDataCallList(options) {
+    RIL.getDataCallList();
+  },
+
+  /**
+   * Get failure cause code for the last failed PDP context.
+   */
+  getFailCauseCode: function getFailCauseCode(options) {
+    RIL.getFailCauseCode();
   },
 
   /**
@@ -1602,7 +1971,9 @@ let Phone = {
     if (DEBUG) debug("Received DOM message " + JSON.stringify(message));
     let method = this[message.type];
     if (typeof method != "function") {
-      debug("Don't know what to do with message " + JSON.stringify(message));
+      if (DEBUG) {
+        debug("Don't know what to do with message " + JSON.stringify(message));
+      }
       return;
     }
     method.call(this, message);
@@ -1726,7 +2097,7 @@ let GsmPDUHelper = {
 
   /**
    * Write numerical data as swapped nibble BCD.
-   * 
+   *
    * @param data
    *        Data to write (as a string or a number)
    */

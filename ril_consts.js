@@ -189,6 +189,19 @@ const RADIO_STATE_RUIM_LOCKED_OR_ABSENT = 7;
 const RADIO_STATE_NV_NOT_READY = 8;
 const RADIO_STATE_NV_READY = 9;
 
+const CARD_STATE_ABSENT = 0;
+const CARD_STATE_PRESENT = 1;
+const CARD_STATE_ERROR = 2;
+
+const CARD_APP_STATE_UNKNOWN = 0;
+const CARD_APP_STATE_DETECTED = 1;
+const CARD_APP_STATE_PIN = 2; // If PIN1 or UPin is required.
+const CARD_APP_STATE_PUK = 3; // If PUK1 or Puk for UPin is required.
+const CARD_APP_STATE_SUBSCRIPTION_PERSO = 4; // perso_substate should be looked
+                                             // at when app_state is assigned
+                                             // to this value.
+const CARD_APP_STATE_READY = 5;
+
 const CARD_MAX_APPS = 8;
 
 const CALL_STATE_ACTIVE = 0;
@@ -393,6 +406,33 @@ const PDU_ALPHABET_7BIT_DEFAULT = [
   "\xfc",   // LATIN SMALL LETTER U WITH DIAERESIS
   "\xe0"    // LATIN SMALL LETTER A WITH GRAVE
 ];
+
+const DATACALL_RADIOTECHNOLOGY_CDMA = 0;
+const DATACALL_RADIOTECHNOLOGY_GSM = 1;
+
+const DATACALL_AUTH_NONE = 0;
+const DATACALL_AUTH_PAP = 1;
+const DATACALL_AUTH_CHAP = 2;
+const DATACALL_AUTH_PAP_OR_CHAP = 3;
+
+const DATACALL_PROFILE_DEFAULT = 0;
+const DATACALL_PROFILE_TETHERED = 1;
+const DATACALL_PROFILE_OEM_BASE = 1000;
+
+const DATACALL_DEACTIVATE_NO_REASON = 0;
+const DATACALL_DEACTIVATE_RADIO_SHUTDOWN = 1;
+
+const DATACALL_INACTIVE = 0;
+const DATACALL_ACTIVE_DOWN = 1;
+const DATACALL_ACTIVE_UP = 2;
+
+// Keep consistent with nsINetworkManager.NETWORK_STATE_*.
+const GECKO_NETWORK_STATE_UNKNOWN = -1;
+const GECKO_NETWORK_STATE_CONNECTING = 0;
+const GECKO_NETWORK_STATE_CONNECTED = 1;
+const GECKO_NETWORK_STATE_SUSPENDED = 2;
+const GECKO_NETWORK_STATE_DISCONNECTING = 3;
+const GECKO_NETWORK_STATE_DISCONNECTED = 4;
 
 
 // Allow this file to be imported via Components.utils.import().
